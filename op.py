@@ -8,6 +8,12 @@ Two inputs reach infer():
   * "weather": the Open-Meteo previous-runs forecast import. Each message is
     one forecast hour at one lead time, published at its issue time; infer()
     only stores it. A forecast is used only once its issue time has passed.
+
+The model's forecast is then corrected for level: over the last
+CORRECTION_WINDOW of daylight hours that have both a forecast and a complete
+actual, the ratio sum(actual) / sum(forecast) scales the new forecast, clipped
+to [CORRECTION_MIN, CORRECTION_MAX]. Only hours already past enter it, so it
+uses nothing a live deployment would not have had.
 """
 
 import datetime
@@ -29,6 +35,14 @@ from training import (
     to_utc,
     train_model,
 )
+
+
+# Level correction from the operator's own recent errors.
+CORRECTION_WINDOW = pd.Timedelta(days=7)
+CORRECTION_MIN_ACTUAL_W = 20.0
+CORRECTION_MIN_HOURS = 24
+CORRECTION_MIN = 0.8
+CORRECTION_MAX = 1.25
 
 
 class CustomConfig(Config):
@@ -55,6 +69,11 @@ class Operator(MLOperator):
         self._pv_count: typing.Dict[pd.Timestamp, int] = {}
         self._pv_seed: typing.Dict[pd.Timestamp, float] = {}
         self._memo: typing.Dict[pd.Timestamp, typing.Tuple[tuple, float]] = {}
+        # The model's own (uncorrected) forecast per target hour, for the level correction.
+        self._raw_pred: typing.Dict[pd.Timestamp, float] = {}
+        self._correction_at: typing.Optional[pd.Timestamp] = None
+        self._correction: float = 1.0
+        self._correction_hours: int = 0
         self._seeded_from: typing.Optional[int] = None
         self._messages = 0
         super().init(*args, **kwargs)
@@ -101,11 +120,38 @@ class Operator(MLOperator):
             return self._pv_sum[hour] / count
         return self._pv_seed.get(hour)
 
+    def _update_correction(self, now: pd.Timestamp) -> None:
+        """Recompute the level correction once per hour, from completed past hours only."""
+        hour_now = now.floor("h")
+        if self._correction_at == hour_now:
+            return
+        self._correction_at = hour_now
+        since = hour_now - CORRECTION_WINDOW
+        pred_sum, actual_sum, n = 0.0, 0.0, 0
+        for hour, pred in self._raw_pred.items():
+            # A bucket is complete once its hour has ended.
+            if hour < since or hour + pd.Timedelta(hours=1) > hour_now:
+                continue
+            count = self._pv_count.get(hour)
+            if not count:
+                continue
+            actual = self._pv_sum[hour] / count
+            if actual < CORRECTION_MIN_ACTUAL_W:
+                continue
+            pred_sum += pred
+            actual_sum += actual
+            n += 1
+        self._correction_hours = n
+        if n >= CORRECTION_MIN_HOURS and pred_sum > 0:
+            self._correction = min(max(actual_sum / pred_sum, CORRECTION_MIN), CORRECTION_MAX)
+        else:
+            self._correction = 1.0
+
     def _prune(self, now: pd.Timestamp) -> None:
         old_fc = now - pd.Timedelta(days=3)
         old_pv = now - pd.Timedelta(days=10)
         self._forecasts = {k: v for k, v in self._forecasts.items() if k[1] >= old_fc}
-        for store in (self._pv_sum, self._pv_count, self._pv_seed):
+        for store in (self._pv_sum, self._pv_count, self._pv_seed, self._raw_pred):
             for hour in [h for h in store if h < old_pv]:
                 del store[hour]
         self._memo = {h: v for h, v in self._memo.items() if h >= now}
@@ -176,13 +222,20 @@ class Operator(MLOperator):
         key = tuple(fc_values[k] for k in sorted(fc_values)) + tuple(lag_values)
         cached = self._memo.get(target_hour)
         if cached is not None and cached[0] == key:
-            prediction = cached[1]
+            raw_prediction = cached[1]
         else:
-            prediction = pm.predict_hour(target_hour, fc_values, lag_values)
-            self._memo[target_hour] = (key, prediction)
+            raw_prediction = pm.predict_hour(target_hour, fc_values, lag_values)
+            self._memo[target_hour] = (key, raw_prediction)
+        self._raw_pred[target_hour] = raw_prediction
+
+        self._update_correction(now)
+        prediction = min(max(raw_prediction * self._correction, 0.0), getattr(pm, "cap", float("inf")))
 
         result = {
             "prediction": prediction,
+            "prediction_uncorrected": raw_prediction,
+            "correction": self._correction,
+            "correction_hours": self._correction_hours,
             "forecast_hour": target_hour.isoformat(),
             "horizon_h": HORIZON.total_seconds() / 3600.0,
         }
