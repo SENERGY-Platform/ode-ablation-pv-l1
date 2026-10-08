@@ -11,7 +11,10 @@ would have been known 24 hours before H:
   * the PV hourly mean at the same hour 2..8 days before H.
 
 The regressor is a gradient-boosted tree ensemble with an absolute-error loss,
-because the evaluation metric is MAE.
+because the evaluation metric is MAE. Training hours are weighted by recency
+(half-life SAMPLE_HALFLIFE_DAYS), so the level of the forecast follows what the
+system has produced lately while the long history still shapes the response
+to the weather.
 """
 
 import datetime
@@ -35,6 +38,9 @@ SITE_LAT = float(os.environ.get("SITE_LAT", "51.7"))
 SITE_LON = float(os.environ.get("SITE_LON", "10.0"))
 # Which forecast lead time to train and predict on.
 FORECAST_LEAD_DAYS = int(os.environ.get("FORECAST_LEAD_DAYS", "2"))
+# Recency weighting: a training hour this many days old counts half as much as
+# the newest one. 0 or less switches weighting off.
+SAMPLE_HALFLIFE_DAYS = float(os.environ.get("SAMPLE_HALFLIFE_DAYS", "90"))
 
 HORIZON = datetime.timedelta(hours=24)
 PV_FIELD = "power"
@@ -287,11 +293,26 @@ def _lag_matrix(pv: pd.Series, hours: pd.DatetimeIndex) -> np.ndarray:
     return np.column_stack(cols) if cols else np.empty((len(hours), 0))
 
 
+def _recency_weights(hours: pd.DatetimeIndex, end: pd.Timestamp) -> typing.Optional[np.ndarray]:
+    """Weight per training hour, halving every SAMPLE_HALFLIFE_DAYS before `end`."""
+    if SAMPLE_HALFLIFE_DAYS <= 0:
+        return None
+    age_days = np.asarray((end - hours).total_seconds(), dtype=float) / 86400.0
+    return np.power(0.5, np.clip(age_days, 0.0, None) / SAMPLE_HALFLIFE_DAYS)
+
+
+def _effective_hours(weights: typing.Optional[np.ndarray], n: int) -> float:
+    """Kish effective sample size: how many equally weighted hours the weights amount to."""
+    if weights is None:
+        return float(n)
+    return float(weights.sum() ** 2 / np.square(weights).sum())
+
+
 @ray.remote
-def _fit(X: pd.DataFrame, y: np.ndarray, params: dict):
+def _fit(X: pd.DataFrame, y: np.ndarray, params: dict, weights: typing.Optional[np.ndarray] = None):
     from sklearn.ensemble import HistGradientBoostingRegressor
     model = HistGradientBoostingRegressor(**params)
-    model.fit(X, y)
+    model.fit(X, y, sample_weight=weights)
     return model
 
 
@@ -362,7 +383,8 @@ def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
         return None
 
     end = hours.max() + pd.Timedelta(hours=1)
-    is_val = np.asarray(hours >= end - pd.Timedelta(days=VALIDATION_DAYS))
+    val_start = end - pd.Timedelta(days=VALIDATION_DAYS)
+    is_val = np.asarray(hours >= val_start)
     cap = float(np.nanmax(y)) * 1.05 if len(y) else 0.0
 
     metrics = dict(diag)
@@ -372,10 +394,14 @@ def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
         "training_window_days": float(TRAINING_WINDOW.days),
         "history_span_days": float((end - hours.min()).total_seconds() / 86400.0),
         "forecast_lead_days": float(lead),
+        "sample_halflife_days": float(SAMPLE_HALFLIFE_DAYS),
     })
     with logger.trace("validate"):
         if is_val.sum() > 0 and (~is_val).sum() > 24 * 14:
-            val_model = ray.get(_fit.remote(X[~is_val], y[~is_val], REGRESSOR_PARAMS))
+            # The hold-out model is weighted relative to the end of its own
+            # training data, exactly as the final model is relative to `end`.
+            w_val = _recency_weights(hours[~is_val], val_start)
+            val_model = ray.get(_fit.remote(X[~is_val], y[~is_val], REGRESSOR_PARAMS, w_val))
             pred = np.clip(val_model.predict(X[is_val]), 0.0, cap)
             actual = y[is_val]
             day = X.loc[is_val, "sin_elev"].to_numpy() > 0
@@ -399,8 +425,10 @@ def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
             metrics.update(_subset_metrics("val_mae_cloudy", cloudy, pred, actual))
 
     with logger.trace("fit"):
-        regressor = ray.get(_fit.remote(X, y, REGRESSOR_PARAMS))
+        w_all = _recency_weights(hours, end)
+        regressor = ray.get(_fit.remote(X, y, REGRESSOR_PARAMS, w_all))
     metrics["train_mae"] = _mae(np.clip(regressor.predict(X), 0.0, cap), y)
+    metrics["train_effective_hours"] = _effective_hours(w_all, len(y))
 
     # What the operator needs at the start of a test window or a deployment:
     # PV hours for the lag features and forecasts already issued for the next days.
@@ -416,6 +444,7 @@ def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
         "training_window_days": TRAINING_WINDOW.days,
         "validation_days": VALIDATION_DAYS,
         "forecast_lead_days": lead,
+        "sample_halflife_days": SAMPLE_HALFLIFE_DAYS,
         "site_lat": SITE_LAT,
         "site_lon": SITE_LON,
         "train_hours": int(len(y)),
