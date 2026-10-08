@@ -13,6 +13,10 @@ dependencies = [
   # stability promise, so this pin is what keeps a rebuild reproducible — and
   # moving it is a deliberate edit, not a side effect of building again.
   "operator-lib @ git+https://github.com/SENERGY-Platform/analytics-operator-lib-python.git@v1.8.1",
+  # The day-ahead regressor (HistGradientBoostingRegressor, absolute-error loss).
+  "scikit-learn>=1.3,<1.7",
+  "pandas>=2.0",
+  "numpy>=1.24",
 ]
 
 [tool.uv]

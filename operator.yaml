@@ -4,7 +4,7 @@
 # so this file is the payload that action sends. Edit it here; it is the source of
 # truth for what the pipeline editor will show.
 name: ode-ablation-pv-l1
-description: An ODE-developed analytics operator
+description: 24 h-ahead forecast of hourly mean PV power (W) from archived weather forecasts
 image: ghcr.io/senergy-platform/ode-ablation-pv-l1:latest
 
 # Public makes the operator visible to other users of the platform. Registration
@@ -12,15 +12,36 @@ image: ghcr.io/senergy-platform/ode-ablation-pv-l1:latest
 pub: false
 deploymentType: local
 
-# What the pipeline editor offers as inputs. "name" has to match a selector arg in
-# op.py — the two together are how a message reaches infer().
+# What the pipeline editor offers as inputs. Each "name" matches a selector arg in
+# op.py: "power" alone is the PV input, the rest together are the weather input
+# (the Open-Meteo previous-runs forecast import).
 inputs:
-  - name: value
+  - name: power
+    type: float
+  - name: forecasted_for
+    type: string
+  - name: issued_at
+    type: string
+  - name: lead_days
+    type: int
+  - name: shortwave_radiation
+    type: float
+  - name: direct_radiation
+    type: float
+  - name: diffuse_radiation
+    type: float
+  - name: cloud_cover
+    type: float
+  - name: temperature_2m
     type: float
 
 # What the operator emits. These are the keys of the dictionary infer() returns.
 outputs:
   - name: prediction
+    type: float
+  - name: forecast_hour
+    type: string
+  - name: horizon_h
     type: float
 
 # Deployment configuration, matching CustomConfig in op.py.
