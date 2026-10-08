@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+
+# Written into the image at build time from the commit being built.
+git_commit
+
+# Local model and data artifacts. The platform's MLflow is where a model belongs;
+# a checkout is not a model registry.
+mlruns/
+*.pkl
+*.pt
+.env

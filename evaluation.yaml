@@ -1,0 +1,37 @@
+# The evaluation criteria for this operator.
+#
+# Yours. ODE has no tool that writes this file and the assistant is not permitted
+# to change it (§5.8) — an operator that grades itself against criteria an
+# assistant relaxed has not been evaluated. ODE reads it to say whether a run met
+# what you asked for, and stops there.
+
+# The metric a run is judged on. Without a data split it has to be a metric the
+# training actually logs, or a run will report it as absent rather than as failed.
+# Under one, Operator Lib computes it over the test window from the three settings
+# further down.
+metric: mae
+
+# The direction that counts as better, and the value that counts as good enough.
+goal: minimise
+threshold: 30.0
+
+# What else to watch. Reported beside the decisive metric on every run, so a model
+# that wins on one number and loses on another is visible rather than surprising.
+secondary_metrics: []
+
+# Free text for the reasoning behind the numbers above. Worth writing: the number
+# is the criterion, and this is why it is that number.
+rationale: >
+  An absolute error in watts rather than a relative one. A relative error is
+  undefined where generation is zero, and a percentage of a small number is not
+  the error this operator is for. The threshold is fixed before the operator
+  exists and does not move while a run is in progress.
+
+# Under a data split, Operator Lib scores the test window itself instead of
+# leaving it to the training code: the platform path of the ground truth, the key
+# infer() returns the forecast under, and the bucket both sides are averaged to
+# before comparing. Leave any of the three unset and nothing is computed — a run
+# behaves exactly as it did before these existed.
+target_series: root.powerTotal
+prediction_field: prediction
+resolution: 1h

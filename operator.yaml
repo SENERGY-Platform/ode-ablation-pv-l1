@@ -1,0 +1,29 @@
+# The operator as the analytics stack registers it (§5.14).
+#
+# ODE offers registration as an explicit action and never performs it on its own,
+# so this file is the payload that action sends. Edit it here; it is the source of
+# truth for what the pipeline editor will show.
+name: ode-ablation-pv-l1
+description: An ODE-developed analytics operator
+image: ghcr.io/senergy-platform/ode-ablation-pv-l1:latest
+
+# Public makes the operator visible to other users of the platform. Registration
+# is a developer decision and so is this.
+pub: false
+deploymentType: local
+
+# What the pipeline editor offers as inputs. "name" has to match a selector arg in
+# op.py — the two together are how a message reaches infer().
+inputs:
+  - name: value
+    type: float
+
+# What the operator emits. These are the keys of the dictionary infer() returns.
+outputs:
+  - name: prediction
+    type: float
+
+# Deployment configuration, matching CustomConfig in op.py.
+config_values:
+  - name: retrain_after_s
+    type: int

@@ -1,0 +1,19 @@
+[project]
+name = "ode-ablation-pv-l1"
+version = "0.1.0"
+# The minor series is pinned rather than left as a floor. uv resolves the driver's
+# environment on the Ray head and each worker's on its own node, and a floor lets
+# those land on different minor versions — which surfaces as a Ray "version
+# mismatch" between driver and worker rather than as anything about Python. The
+# patch level is deliberately left open: it is the minor that has to agree.
+requires-python = "==3.10.*"
+dependencies = [
+  "ray[client,train]",
+  # Pinned at scaffold time (D15). Operator Lib tracks latest and makes no
+  # stability promise, so this pin is what keeps a rebuild reproducible — and
+  # moving it is a deliberate edit, not a side effect of building again.
+  "operator-lib @ git+https://github.com/SENERGY-Platform/analytics-operator-lib-python.git@v1.8.1",
+]
+
+[tool.uv]
+package = false
