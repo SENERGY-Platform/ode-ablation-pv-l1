@@ -53,6 +53,10 @@ FC_OFFSETS = (-1, 0, 1, 2)
 LAG_DAYS = tuple(range(2, 9))
 PRIMARY_FEATURE = "shortwave_radiation_+1"
 
+# Hold-out diagnostics: hours the forecast called clear vs. cloudy, by kt.
+KT_CLEAR = 0.7
+KT_CLOUDY = 0.4
+
 FEATURES = (
     [f"{v}_{o:+d}" for v in WEATHER_VARS for o in FC_OFFSETS]
     + ["sin_elev", "clear_sky", "kt", "hour", "hour_sin", "hour_cos", "doy_sin", "doy_cos"]
@@ -295,6 +299,19 @@ def _mae(pred: np.ndarray, actual: np.ndarray) -> float:
     return float(np.mean(np.abs(pred - actual))) if len(actual) else float("nan")
 
 
+def _subset_metrics(name: str, mask: np.ndarray, pred: np.ndarray, actual: np.ndarray) -> typing.Dict[str, float]:
+    """MAE, bias and hour count over one subset of the hold-out; nothing when it is empty."""
+    n = int(mask.sum())
+    if n == 0:
+        return {f"{name}_hours": 0.0}
+    return {
+        f"{name}": _mae(pred[mask], actual[mask]),
+        f"{name}_bias": float(np.mean(pred[mask] - actual[mask])),
+        f"{name}_mean_actual": float(np.mean(actual[mask])),
+        f"{name}_hours": float(n),
+    }
+
+
 def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
     """Read the history, fit, and hand back a model for MLflow to register."""
     with logger.trace("read history"):
@@ -349,21 +366,37 @@ def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
     cap = float(np.nanmax(y)) * 1.05 if len(y) else 0.0
 
     metrics = dict(diag)
+    # Logged as metrics too, because a run summary may carry metrics only.
+    metrics.update({
+        "train_hours": float(len(y)),
+        "training_window_days": float(TRAINING_WINDOW.days),
+        "history_span_days": float((end - hours.min()).total_seconds() / 86400.0),
+        "forecast_lead_days": float(lead),
+    })
     with logger.trace("validate"):
         if is_val.sum() > 0 and (~is_val).sum() > 24 * 14:
             val_model = ray.get(_fit.remote(X[~is_val], y[~is_val], REGRESSOR_PARAMS))
             pred = np.clip(val_model.predict(X[is_val]), 0.0, cap)
             actual = y[is_val]
             day = X.loc[is_val, "sin_elev"].to_numpy() > 0
+            kt = X.loc[is_val, "kt"].to_numpy()
             lag_base = X.loc[is_val, "lag_mean"].fillna(0.0).to_numpy()
             metrics.update({
                 "val_mae": _mae(pred, actual),
+                "val_bias": float(np.mean(pred - actual)),
                 "val_mae_daylight": _mae(pred[day], actual[day]),
                 "val_mae_lag_baseline": _mae(lag_base, actual),
                 "val_mae_zero_baseline": _mae(np.zeros_like(actual), actual),
                 "val_hours": float(len(actual)),
                 "val_mean_actual": float(np.mean(actual)),
             })
+            # Where the error lives: hours the forecast called clear (a model
+            # error there is systematic) vs. cloudy (mostly forecast error).
+            with np.errstate(invalid="ignore"):
+                clear = np.nan_to_num(kt, nan=-1.0) >= KT_CLEAR
+                cloudy = (np.nan_to_num(kt, nan=99.0) < KT_CLOUDY) & day
+            metrics.update(_subset_metrics("val_mae_clear", clear, pred, actual))
+            metrics.update(_subset_metrics("val_mae_cloudy", cloudy, pred, actual))
 
     with logger.trace("fit"):
         regressor = ray.get(_fit.remote(X, y, REGRESSOR_PARAMS))
